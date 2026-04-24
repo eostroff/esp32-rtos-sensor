@@ -10,6 +10,7 @@
 
 static const char *TAG = "app";
 static QueueHandle_t temperature_queue = NULL;
+static QueueHandle_t pressure_queue = NULL;
 static bmp390_handle_t sensor_handle = NULL;
 
 static void sensor_read_task(void *pvParameters) {
@@ -25,9 +26,13 @@ static void sensor_read_task(void *pvParameters) {
 		} else {
 			if (xQueueOverwrite(temperature_queue, &temperature_c) != pdPASS) {
 				ESP_LOGW(TAG, "Failed to enqueue temperature reading");
-			} else {
-				ESP_LOGI(TAG, "Enqueued temperature: %.2f C", temperature_c);
 			}
+
+			if (xQueueOverwrite(pressure_queue, &pressure_pa) != pdPASS) {
+				ESP_LOGW(TAG, "Failed to enqueue pressure reading");
+			}
+
+			ESP_LOGI(TAG, "Enqueued temperature: %.2f C, pressure: %.2f hPa", temperature_c, pressure_pa / 100.0f);
 		}
 
 		vTaskDelay(pdMS_TO_TICKS(1000));
@@ -62,6 +67,12 @@ void app_main(void) {
 	temperature_queue = xQueueCreate(1, sizeof(float));
 	if (temperature_queue == NULL) {
 		ESP_LOGE(TAG, "Failed to create temperature queue");
+		return;
+	}
+
+	pressure_queue = xQueueCreate(1, sizeof(float));
+	if (pressure_queue == NULL) {
+		ESP_LOGE(TAG, "Failed to create pressure queue");
 		return;
 	}
 
