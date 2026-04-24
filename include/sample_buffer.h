@@ -14,5 +14,6 @@ esp_err_t sample_buffer_init(void);
 void sample_buffer_push(const sensor_reading_t *reading);
 size_t sample_buffer_count(void);
 SemaphoreHandle_t sample_buffer_data_semaphore(void);
+esp_err_t sample_buffer_get_latest_by_type(reading_type_t type, sensor_reading_t *out);
 
 #endif

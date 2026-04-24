@@ -69,3 +69,25 @@ size_t sample_buffer_count(void) {
 SemaphoreHandle_t sample_buffer_data_semaphore(void) {
 	return readings_available_sem;
 }
+
+esp_err_t sample_buffer_get_latest_by_type(reading_type_t type, sensor_reading_t *out) {
+	if (out == NULL || ring_buffer_mutex == NULL) {
+		return ESP_ERR_INVALID_ARG;
+	}
+
+	esp_err_t result = ESP_ERR_NOT_FOUND;
+
+	if (xSemaphoreTake(ring_buffer_mutex, portMAX_DELAY) == pdTRUE) {
+		for (uint32_t i = 0; i < ring_count; i++) {
+			uint32_t idx = (ring_write_index + READING_RING_BUFFER_SIZE - 1 - i) % READING_RING_BUFFER_SIZE;
+			if (reading_ring_buffer[idx].type == type) {
+				*out = reading_ring_buffer[idx];
+				result = ESP_OK;
+				break;
+			}
+		}
+		xSemaphoreGive(ring_buffer_mutex);
+	}
+
+	return result;
+}

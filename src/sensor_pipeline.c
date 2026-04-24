@@ -2,11 +2,13 @@
 
 #include <bmp390.h>
 
+#include <ble_beacon.h>
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 #include <sample_buffer.h>
@@ -42,6 +44,21 @@ static void sensor_read_task(void *pvParameters) {
 		}
 
 		vTaskDelay(pdMS_TO_TICKS(1000));
+	}
+}
+
+static void beacon_update_task(void *pvParameters) {
+	(void)pvParameters;
+
+	SemaphoreHandle_t data_sem = sample_buffer_data_semaphore();
+
+	while (true) {
+		if (xSemaphoreTake(data_sem, portMAX_DELAY) == pdTRUE) {
+			sensor_reading_t reading;
+			if (sample_buffer_get_latest_by_type(READING_TEMPERATURE, &reading) == ESP_OK) {
+				ble_beacon_set_temperature(reading.value);
+			}
+		}
 	}
 }
 
@@ -135,6 +152,12 @@ esp_err_t sensor_pipeline_start(void) {
 	task_ok = xTaskCreate(queue_to_ring_buffer_task, "queue_to_ring_buffer_task", 4096, NULL, 5, NULL);
 	if (task_ok != pdPASS) {
 		ESP_LOGE(TAG, "Failed to create queue to ring buffer task");
+		return ESP_FAIL;
+	}
+
+	task_ok = xTaskCreate(beacon_update_task, "beacon_update_task", 4096, NULL, 5, NULL);
+	if (task_ok != pdPASS) {
+		ESP_LOGE(TAG, "Failed to create beacon update task");
 		return ESP_FAIL;
 	}
 
