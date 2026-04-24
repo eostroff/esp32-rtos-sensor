@@ -6,12 +6,44 @@
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 static const char *TAG = "app";
 static QueueHandle_t temperature_queue = NULL;
 static QueueHandle_t pressure_queue = NULL;
+static QueueSetHandle_t sensor_queue_set = NULL;
+static SemaphoreHandle_t ring_buffer_mutex = NULL;
+static SemaphoreHandle_t readings_available_sem = NULL;
 static bmp390_handle_t sensor_handle = NULL;
+
+#define READING_RING_BUFFER_SIZE 32
+
+typedef enum {
+	READING_TEMPERATURE = 0,
+	READING_PRESSURE,
+} reading_type_t;
+
+typedef struct {
+	reading_type_t type;
+	float value;
+	TickType_t timestamp_ticks;
+} sensor_reading_t;
+
+static sensor_reading_t reading_ring_buffer[READING_RING_BUFFER_SIZE];
+static uint32_t ring_write_index = 0;
+static uint32_t ring_count = 0;
+
+static void ring_buffer_push(const sensor_reading_t *reading) {
+	if (xSemaphoreTake(ring_buffer_mutex, portMAX_DELAY) == pdTRUE) {
+		reading_ring_buffer[ring_write_index] = *reading;
+		ring_write_index = (ring_write_index + 1U) % READING_RING_BUFFER_SIZE;
+		if (ring_count < READING_RING_BUFFER_SIZE) {
+			ring_count++;
+		}
+		xSemaphoreGive(ring_buffer_mutex);
+	}
+}
 
 static void sensor_read_task(void *pvParameters) {
 	(void)pvParameters;
@@ -36,6 +68,34 @@ static void sensor_read_task(void *pvParameters) {
 		}
 
 		vTaskDelay(pdMS_TO_TICKS(1000));
+	}
+}
+
+static void queue_to_ring_buffer_task(void *pvParameters) {
+	(void)pvParameters;
+
+	while (true) {
+		QueueSetMemberHandle_t ready_member = xQueueSelectFromSet(sensor_queue_set, portMAX_DELAY);
+		sensor_reading_t reading = {
+			.type = READING_TEMPERATURE,
+			.value = 0.0f,
+			.timestamp_ticks = xTaskGetTickCount(),
+		};
+
+		BaseType_t received = pdFALSE;
+		if (ready_member == temperature_queue) {
+			received = xQueueReceive(temperature_queue, &reading.value, 0);
+			reading.type = READING_TEMPERATURE;
+		} else if (ready_member == pressure_queue) {
+			received = xQueueReceive(pressure_queue, &reading.value, 0);
+			reading.type = READING_PRESSURE;
+		}
+
+		if (received == pdTRUE) {
+			reading.timestamp_ticks = xTaskGetTickCount();
+			ring_buffer_push(&reading);
+			xSemaphoreGive(readings_available_sem);
+		}
 	}
 }
 
@@ -76,12 +136,42 @@ void app_main(void) {
 		return;
 	}
 
+	sensor_queue_set = xQueueCreateSet(2);
+	if (sensor_queue_set == NULL) {
+		ESP_LOGE(TAG, "Failed to create sensor queue set");
+		return;
+	}
+
+	if (xQueueAddToSet(temperature_queue, sensor_queue_set) != pdPASS ||
+		xQueueAddToSet(pressure_queue, sensor_queue_set) != pdPASS) {
+		ESP_LOGE(TAG, "Failed to add queues to queue set");
+		return;
+	}
+
+	ring_buffer_mutex = xSemaphoreCreateMutex();
+	if (ring_buffer_mutex == NULL) {
+		ESP_LOGE(TAG, "Failed to create ring buffer mutex");
+		return;
+	}
+
+	readings_available_sem = xSemaphoreCreateCounting(READING_RING_BUFFER_SIZE, 0);
+	if (readings_available_sem == NULL) {
+		ESP_LOGE(TAG, "Failed to create readings semaphore");
+		return;
+	}
+
 	BaseType_t task_ok = xTaskCreate(sensor_read_task, "sensor_read_task", 4096, NULL, 5, NULL);
 	if (task_ok != pdPASS) {
 		ESP_LOGE(TAG, "Failed to create sensor read task");
 		return;
 	}
 
-	ESP_LOGI(TAG, "Sensor read task started");
+	task_ok = xTaskCreate(queue_to_ring_buffer_task, "queue_to_ring_buffer_task", 4096, NULL, 5, NULL);
+	if (task_ok != pdPASS) {
+		ESP_LOGE(TAG, "Failed to create queue to ring buffer task");
+		return;
+	}
+
+	ESP_LOGI(TAG, "Sensor read and queue-to-ring tasks started");
 	vTaskDelete(NULL);
 }
